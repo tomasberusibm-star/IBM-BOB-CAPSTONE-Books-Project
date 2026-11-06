@@ -1,11 +1,36 @@
 import { Router } from 'express';
 import { AppError } from '../errors.js';
 import { requireAuth, wrap } from '../middleware.js';
-import { addBasketItemBody, checkoutAddressBody, idempotencyKeyHeader, paymentBody } from '../validation.js';
+import {
+  addBasketItemBody,
+  basketItemParams,
+  checkoutAddressBody,
+  idempotencyKeyHeader,
+  paymentBody,
+  setQuantityBody,
+} from '../validation.js';
 
 export function checkoutRoutes({ auth, basket, checkout }) {
   const r = Router();
   const authed = requireAuth(auth);
+
+  r.get('/basket', authed, wrap(async (req, res) => {
+    res.json(await basket.get(req.user.id));
+  }));
+
+  r.patch('/basket/items/:productId', authed, wrap(async (req, res) => {
+    const { productId } = basketItemParams.parse(req.params);
+    res.json(await basket.setQuantity(req.user.id, productId, setQuantityBody.parse(req.body).quantity));
+  }));
+
+  r.delete('/basket/items/:productId', authed, wrap(async (req, res) => {
+    const { productId } = basketItemParams.parse(req.params);
+    res.json(await basket.removeItem(req.user.id, productId));
+  }));
+
+  r.get('/addresses', authed, wrap(async (req, res) => {
+    res.json({ items: await checkout.listAddresses(req.user.id) });
+  }));
 
   r.post('/basket/items', authed, wrap(async (req, res) => {
     res.json(await basket.addItem(req.user.id, addBasketItemBody.parse(req.body)));

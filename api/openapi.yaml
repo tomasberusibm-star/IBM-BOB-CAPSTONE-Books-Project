@@ -557,6 +557,115 @@ paths:
   # ---------------------------------------------------------------------------
   # 4. Basket & checkout
   # ---------------------------------------------------------------------------
+  /api/basket:
+    get:
+      tags: [Basket]
+      operationId: getBasket
+      summary: Get the caller's active basket
+      description: "Returns an empty basket (`id` is null) if the user has none yet; reading never creates one."
+      responses:
+        '200':
+          description: The basket.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Basket'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /api/basket/items/{productId}:
+    patch:
+      tags: [Basket]
+      operationId: setBasketItemQuantity
+      summary: Set the quantity of a product already in the basket
+      parameters:
+        - $ref: '#/components/parameters/BasketProductId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [quantity]
+              properties:
+                quantity:
+                  type: integer
+                  minimum: 1
+                  maximum: 999
+      responses:
+        '200':
+          description: The updated basket.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Basket'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Not enough stock for the requested quantity (`INSUFFICIENT_STOCK`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+    delete:
+      tags: [Basket]
+      operationId: removeBasketItem
+      summary: Remove a product from the basket
+      description: Idempotent - removing a product that is not in the basket is not an error.
+      parameters:
+        - $ref: '#/components/parameters/BasketProductId'
+      responses:
+        '200':
+          description: The updated basket.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Basket'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /api/addresses:
+    get:
+      tags: [Checkout]
+      operationId: listAddresses
+      summary: List the caller's saved shipping addresses
+      description: The address book, default address first. One-off checkout addresses are not included.
+      responses:
+        '200':
+          description: Saved addresses.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      allOf:
+                        - $ref: '#/components/schemas/Address'
+                        - type: object
+                          properties:
+                            is_default_shipping:
+                              type: boolean
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
   /api/basket/items:
     post:
       tags: [Basket]
@@ -872,6 +981,15 @@ components:
         type: string
         enum: [title, price_asc, price_desc, newest, delivery]
         default: title
+    BasketProductId:
+      name: productId
+      in: path
+      required: true
+      description: ID of a product in the basket.
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
     Page:
       name: page
       in: query
@@ -1504,6 +1622,7 @@ components:
         id:
           type: integer
           format: int64
+          nullable: true
         items:
           type: array
           items:

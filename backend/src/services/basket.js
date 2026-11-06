@@ -43,7 +43,40 @@ export async function fetchBasket(db, cartId, config) {
 }
 
 export function createBasketService({ pool, config }) {
+  const emptyBasket = () => ({ id: null, items: [], item_count: 0, subtotal_amount: '0.00', currency: config.currency });
+
   return {
+    /** The caller's active basket; an empty one if none exists yet (a read never creates rows). */
+    async get(userId) {
+      const { rows } = await pool.query("SELECT id FROM carts WHERE user_id = $1 AND status = 'active'", [userId]);
+      return rows.length === 0 ? emptyBasket() : fetchBasket(pool, rows[0].id, config);
+    },
+
+    /** Sets the quantity of a product that is already in the basket. */
+    async setQuantity(userId, productId, quantity) {
+      return withTransaction(pool, async (db) => {
+        const cartId = await lockOrCreateCart(db, userId);
+        const { rows } = await db.query(
+          `SELECT p.stock_quantity FROM cart_items ci JOIN products p ON p.id = ci.product_id
+            WHERE ci.cart_id = $1 AND ci.product_id = $2 FOR SHARE OF p`,
+          [cartId, productId],
+        );
+        if (rows.length === 0) throw notFound();
+        if (rows[0].stock_quantity !== null && quantity > rows[0].stock_quantity) throw insufficientStock();
+        await db.query('UPDATE cart_items SET quantity = $3 WHERE cart_id = $1 AND product_id = $2', [cartId, productId, quantity]);
+        return fetchBasket(db, cartId, config);
+      });
+    },
+
+    /** Removes a product from the basket. Idempotent: removing something that is not there is not an error. */
+    async removeItem(userId, productId) {
+      return withTransaction(pool, async (db) => {
+        const cartId = await lockOrCreateCart(db, userId);
+        await db.query('DELETE FROM cart_items WHERE cart_id = $1 AND product_id = $2', [cartId, productId]);
+        return fetchBasket(db, cartId, config);
+      });
+    },
+
     async addItem(userId, { product_id, quantity }) {
       return withTransaction(pool, async (db) => {
         const cartId = await lockOrCreateCart(db, userId);

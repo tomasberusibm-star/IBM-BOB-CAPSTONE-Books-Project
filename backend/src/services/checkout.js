@@ -41,6 +41,16 @@ export function createCheckoutService({ pool, config, provider, logger }) {
   const pricing = (lines) => priceOrder(lines.map((l) => ({ price: l.price, quantity: l.quantity, format: l.format })), config);
 
   return {
+    /** The user's address book (one-off checkout addresses are not listed), default first. */
+    async listAddresses(userId) {
+      const { rows } = await pool.query(
+        `SELECT ${ADDRESS_COLUMNS}, is_default_shipping FROM addresses
+          WHERE user_id = $1 AND is_saved ORDER BY is_default_shipping DESC, id`,
+        [userId],
+      );
+      return rows;
+    },
+
     /**
      * Step 1: choose the shipping address (saved id or new address) and price the
      * basket. Safe to call repeatedly to change the address before paying.

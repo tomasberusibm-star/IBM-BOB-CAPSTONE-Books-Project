@@ -427,3 +427,62 @@ describe('payment - idempotency and stock', () => {
     assert.equal(retry.status, 201);
   });
 });
+
+describe('basket management and address book (used by the UI)', () => {
+  it('reads an empty basket without creating one, then reflects additions', async () => {
+    const u = await h.newUser('bm1');
+    const empty = await h.api('GET', '/api/basket', { token: u.token });
+    assert.equal(empty.status, 200);
+    assert.deepEqual([empty.body.items.length, empty.body.item_count, empty.body.subtotal_amount], [0, 0, '0.00']);
+    assert.equal(await count('carts', u), 0, 'a read never creates rows');
+    await addToBasket(u, 'BK-DUNE-001', 2);
+    assert.equal((await h.api('GET', '/api/basket', { token: u.token })).body.item_count, 2);
+    assert.equal((await h.api('GET', '/api/basket')).status, 401);
+  });
+
+  it('changes quantity (bounded by stock) and removes items', async () => {
+    const u = await h.newUser('bm2');
+    await addToBasket(u, 'BK-DUNE-001', 1);
+    const id = await h.sku('BK-DUNE-001');
+    const set = await h.api('PATCH', `/api/basket/items/${id}`, { token: u.token, body: { quantity: 4 } });
+    assert.equal(set.body.items[0].quantity, 4);
+    assert.equal(set.body.subtotal_amount, '39.96');
+
+    await h.pool.query("UPDATE products SET stock_quantity = 3 WHERE sku = 'BK-DUNE-001'");
+    const over = await h.api('PATCH', `/api/basket/items/${id}`, { token: u.token, body: { quantity: 4 } });
+    assert.equal(over.status, 409);
+    await h.pool.query("UPDATE products SET stock_quantity = 300 WHERE sku = 'BK-DUNE-001'");
+
+    assert.equal((await h.api('PATCH', `/api/basket/items/${id}`, { token: u.token, body: { quantity: 0 } })).status, 400);
+    assert.equal((await h.api('PATCH', `/api/basket/items/${await h.sku('BK-NEURO-001')}`, { token: u.token, body: { quantity: 1 } })).status, 404);
+
+    const removed = await h.api('DELETE', `/api/basket/items/${id}`, { token: u.token });
+    assert.equal(removed.status, 200);
+    assert.equal(removed.body.items.length, 0);
+    assert.equal((await h.api('DELETE', `/api/basket/items/${id}`, { token: u.token })).status, 200, 'idempotent');
+  });
+
+  it('never exposes another customer’s basket', async () => {
+    const a = await h.newUser('bm3a');
+    const b = await h.newUser('bm3b');
+    await addToBasket(a, 'BK-DUNE-001', 1);
+    assert.equal((await h.api('GET', '/api/basket', { token: b.token })).body.item_count, 0);
+    assert.equal((await h.api('DELETE', `/api/basket/items/${await h.sku('BK-DUNE-001')}`, { token: b.token })).body.item_count, 0);
+    assert.equal((await h.api('GET', '/api/basket', { token: a.token })).body.item_count, 1);
+  });
+
+  it('lists only saved addresses of the caller, default first', async () => {
+    const a = await h.newUser('bm4a');
+    const b = await h.newUser('bm4b');
+    const ins = (u, label, def, saved) => h.pool.query(
+      `INSERT INTO addresses (user_id, label, recipient_name, line1, city, postal_code, country_code, is_default_shipping, is_saved)
+       VALUES ($1, $2, 'R', '1 St', 'C', '1', 'US', $3, $4)`, [u.id, label, def, saved]);
+    await ins(a, 'Work', false, true);
+    await ins(a, 'Home', true, true);
+    await ins(a, 'one-off', false, false);
+    await ins(b, 'Other', true, true);
+    const res = await h.api('GET', '/api/addresses', { token: a.token });
+    assert.deepEqual(res.body.items.map((x) => x.label), ['Home', 'Work']);
+    assert.equal((await h.api('GET', '/api/addresses')).status, 401);
+  });
+});

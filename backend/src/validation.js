@@ -64,6 +64,9 @@ export const ordersQuery = z.object({
 
 export const cancelBody = z.strictObject({ reason: z.string().trim().max(500).optional() }).default({});
 
+export const basketItemParams = z.object({ productId: id });
+export const setQuantityBody = z.strictObject({ quantity: z.number().int().min(1).max(999) });
+
 export const addBasketItemBody = z.strictObject({
   product_id: id,
   quantity: z.number().int().min(1).max(999),
