@@ -43,11 +43,23 @@ cd backend  && npm install && npm start      # API on 127.0.0.1:8080 (see backen
 cd frontend && npm install && npm run dev    # UI on http://127.0.0.1:5173
 ```
 
+## QA (Jest + Supertest, React Testing Library, Cypress)
+
+[`qa/`](qa/) holds the black-box suites for authentication, catalogue browsing and related products,
+basket and checkout (gift points, payment confirmation) and order history (**Buy In Again**, 48-hour
+cancellation). API responses are validated against `api/openapi.yaml`; Cypress drives a real browser
+against a throwaway database, API and web server. See [`qa/README.md`](qa/README.md) for the traceability
+matrix and how to run it.
+
+```bash
+cd qa && npm install && npm run test:api && npm run test:e2e
+```
+
 ## Status
 
-Database schema, API contract, backend (96 tests against a real PostgreSQL) and frontend (37 tests,
-plus an end-to-end browser walkthrough against the live API) are implemented. Payments use a mock
-processor: no real card is ever charged.
+Database schema, API contract, backend (96 tests against a real PostgreSQL), frontend (88 component
+tests) and the QA suite (167 API contract tests, 75 Cypress browser tests) are implemented. Payments use a
+mock processor: no real card is ever charged.
 
 ## License
 

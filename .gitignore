@@ -20,3 +20,8 @@ build/
 
 # Logs
 *.log
+
+# QA artefacts
+qa/cypress/screenshots/
+qa/cypress/videos/
+qa/cypress/downloads/
