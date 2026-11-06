@@ -160,6 +160,20 @@ paths:
         '429':
           $ref: '#/components/responses/TooManyRequests'
 
+  /api/auth/logout:
+    post:
+      tags: [Authentication]
+      operationId: logoutUser
+      summary: Log out (revoke the current session)
+      description: The access token stops working immediately, not when it would have expired.
+      responses:
+        '204':
+          description: Session revoked.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
   # ---------------------------------------------------------------------------
   # 2. Catalogue & recommendations
   # ---------------------------------------------------------------------------
@@ -203,21 +217,18 @@ paths:
       tags: [Catalogue]
       operationId: listCategoryProducts
       summary: List the products in a category
+      description: |
+        Filter by `brand`, free-text `q`, availability and a latest acceptable delivery
+        date (`deliver_by`). See `GET /api/products` for the delivery-date rules.
       security: []
       parameters:
         - $ref: '#/components/parameters/CategoryId'
-        - name: include_subcategories
-          in: query
-          description: Also include products from all descendant categories.
-          schema:
-            type: boolean
-            default: true
-        - name: sort
-          in: query
-          schema:
-            type: string
-            enum: [title, price_asc, price_desc, newest]
-            default: title
+        - $ref: '#/components/parameters/IncludeSubcategories'
+        - $ref: '#/components/parameters/Brand'
+        - $ref: '#/components/parameters/SearchText'
+        - $ref: '#/components/parameters/AvailableOnly'
+        - $ref: '#/components/parameters/DeliverBy'
+        - $ref: '#/components/parameters/ProductSort'
         - $ref: '#/components/parameters/Page'
         - $ref: '#/components/parameters/PageSize'
       responses:
@@ -231,6 +242,75 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /api/brands:
+    get:
+      tags: [Catalogue]
+      operationId: listBrands
+      summary: List brands (publishers)
+      description: Brand `slug` values are used by the `brand` filter on the product listings.
+      security: []
+      responses:
+        '200':
+          description: All brands, ordered by name.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Brand'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /api/products:
+    get:
+      tags: [Catalogue]
+      operationId: listProducts
+      summary: Search and filter products across the whole catalogue
+      description: |
+        Combine any of the filters; all are optional and are ANDed together.
+
+        **Tentative delivery date** (`tentative_delivery_date` on every product):
+        * stock not tracked (e-books, audiobooks) - `null`, delivered instantly;
+        * in stock - the stored date if it is still today or later, otherwise
+          *today + the store's standard lead time* (never a date in the past);
+        * out of stock - the stored restock date if it is still today or later,
+          otherwise `null` (unknown).
+
+        `deliver_by` keeps only products that can arrive by that date: instant items
+        always qualify, items with an unknown delivery date never do.
+      security: []
+      parameters:
+        - name: category_id
+          in: query
+          description: Restrict to a category (and its descendants unless `include_subcategories=false`).
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+        - $ref: '#/components/parameters/IncludeSubcategories'
+        - $ref: '#/components/parameters/Brand'
+        - $ref: '#/components/parameters/SearchText'
+        - $ref: '#/components/parameters/AvailableOnly'
+        - $ref: '#/components/parameters/DeliverBy'
+        - $ref: '#/components/parameters/ProductSort'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: A page of products.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProductPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '429':
           $ref: '#/components/responses/TooManyRequests'
 
@@ -471,6 +551,8 @@ paths:
                     request_id: 3f1c9a52-7d0e-4b1a-9c55-1f6a2f0e8b11
         '429':
           $ref: '#/components/responses/TooManyRequests'
+        '502':
+          $ref: '#/components/responses/BadGateway'
 
   # ---------------------------------------------------------------------------
   # 4. Basket & checkout
@@ -592,11 +674,16 @@ paths:
         * **Card only** - send `card`; `gift_points_to_redeem` is `0`.
         * **Gift points + card** - send both; points reduce the amount charged to the card.
         * **Gift points only** - send `gift_points_to_redeem` worth the full total and
-          omit `card`.
+          omit `card`. Points cover the **item subtotal** only, so this works only when
+          shipping and tax are zero (e.g. digital-only baskets); otherwise a card is
+          required for the remainder. A card sent when points already cover the total
+          is rejected (`CARD_NOT_REQUIRED`).
 
         Credit and debit cards are supported through a provider-issued `payment_token`;
         raw card numbers are rejected. `Idempotency-Key` is mandatory: replaying the same
-        key returns the original result and never charges twice.
+        key returns the original result (header `Idempotent-Replayed: true`) and never
+        charges twice. If anything fails after the card was charged, the charge is
+        refunded automatically before the error is returned.
 
         Gift points cannot exceed the customer's balance or the order subtotal.
       parameters:
@@ -663,8 +750,8 @@ paths:
         '409':
           description: |
             The basket cannot be ordered: `ADDRESS_REQUIRED` (step 1 not done),
-            `BASKET_EMPTY`, `INSUFFICIENT_STOCK`, or the `Idempotency-Key` is already
-            being processed.
+            `BASKET_EMPTY`, `INSUFFICIENT_STOCK`, `PRODUCT_UNAVAILABLE`, or the
+            `Idempotency-Key` is already being processed (`REQUEST_IN_PROGRESS`).
           content:
             application/json:
               schema:
@@ -676,8 +763,9 @@ paths:
         '422':
           description: |
             Valid request, but the payment is not acceptable: `INSUFFICIENT_GIFT_POINTS`,
-            `GIFT_POINTS_EXCEED_SUBTOTAL`, or `PAYMENT_METHOD_REQUIRED` (points do not
-            cover the total and no card was supplied).
+            `GIFT_POINTS_EXCEED_SUBTOTAL`, `PAYMENT_METHOD_REQUIRED` (points do not cover
+            the total and no card was supplied), `CARD_NOT_REQUIRED`, or
+            `IDEMPOTENCY_KEY_REUSED` (same key, different request).
           content:
             application/json:
               schema:
@@ -688,6 +776,8 @@ paths:
                 request_id: 3f1c9a52-7d0e-4b1a-9c55-1f6a2f0e8b11
         '429':
           $ref: '#/components/responses/TooManyRequests'
+        '502':
+          $ref: '#/components/responses/BadGateway'
 
 components:
   securitySchemes:
@@ -733,6 +823,55 @@ components:
       schema:
         type: string
         format: uuid
+    IncludeSubcategories:
+      name: include_subcategories
+      in: query
+      description: Also include products from all descendant categories.
+      schema:
+        type: boolean
+        default: true
+    Brand:
+      name: brand
+      in: query
+      description: Brand slug(s); repeat the parameter or use commas (`brand=ace,pearson`). Any match qualifies.
+      style: form
+      explode: true
+      schema:
+        type: array
+        maxItems: 20
+        items:
+          type: string
+          pattern: '^[a-z0-9-]{1,100}$'
+    SearchText:
+      name: q
+      in: query
+      description: Full-text search over title and description.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 200
+    AvailableOnly:
+      name: available_only
+      in: query
+      description: Hide out-of-stock products.
+      schema:
+        type: boolean
+        default: false
+    DeliverBy:
+      name: deliver_by
+      in: query
+      description: Only products that can be delivered on or before this date (YYYY-MM-DD).
+      schema:
+        type: string
+        format: date
+    ProductSort:
+      name: sort
+      in: query
+      description: '`delivery` lists instant items first, then the soonest tentative date, then unknown dates.'
+      schema:
+        type: string
+        enum: [title, price_asc, price_desc, newest, delivery]
+        default: title
     Page:
       name: page
       in: query
@@ -800,6 +939,16 @@ components:
           example:
             code: NOT_FOUND
             message: The requested resource was not found.
+            request_id: 3f1c9a52-7d0e-4b1a-9c55-1f6a2f0e8b11
+    BadGateway:
+      description: The payment provider failed or was unreachable. Nothing was charged or changed; safe to retry.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: PAYMENT_PROVIDER_ERROR
+            message: The payment could not be processed. Please try again.
             request_id: 3f1c9a52-7d0e-4b1a-9c55-1f6a2f0e8b11
     TooManyRequests:
       description: Rate limit exceeded.
@@ -1453,7 +1602,7 @@ components:
           type: integer
           minimum: 0
           default: 0
-          description: Points to spend; 1 point = 0.01.
+          description: Points to spend; 1 point = 0.01. Cannot exceed the balance or the item subtotal.
         card:
           $ref: '#/components/schemas/CardPayment'
       description: |

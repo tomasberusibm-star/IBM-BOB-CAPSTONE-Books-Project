@@ -24,9 +24,16 @@ npx @redocly/cli@2.76.0 lint api/openapi.yaml      # validate
 npx @redocly/cli@2.76.0 preview-docs api/openapi.yaml   # browse the docs locally
 ```
 
+## Backend (Node.js / Express)
+
+[`backend/`](backend/) implements the API on top of the schema: authentication and sessions, catalogue
+filtering with delivery-date logic, order-history recommendations, "Buy it again", the 48-hour
+cancellation window, and checkout with gift points plus card payments. See
+[`backend/README.md`](backend/README.md) for setup, tests and production notes.
+
 ## Status
 
-Database schema and API contract complete; implementation to be defined.
+Database schema, API contract and backend implemented and tested (92 tests against a real PostgreSQL).
 
 ## License
 

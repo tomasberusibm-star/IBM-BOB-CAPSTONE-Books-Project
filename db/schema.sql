@@ -46,6 +46,26 @@ CREATE FUNCTION gift_points_value(p_points integer) RETURNS numeric
 LANGUAGE sql IMMUTABLE PARALLEL SAFE
 AS $$ SELECT round(p_points * 0.01, 2) $$;
 
+-- Delivery date shown to customers. Single source of truth for the catalogue,
+-- basket, checkout and order snapshots.
+--   * stock not tracked (e-books, audiobooks) -> NULL (delivered instantly)
+--   * in stock                                -> stored date if it is still today or
+--                                                later, otherwise today + p_lead_days
+--   * out of stock                            -> stored restock date if it is still
+--                                                today or later, otherwise NULL (unknown)
+CREATE FUNCTION effective_delivery_date(p_stock integer, p_stored date, p_lead_days integer)
+RETURNS date
+LANGUAGE sql STABLE PARALLEL SAFE
+AS $$
+    SELECT CASE
+        WHEN p_stock IS NULL THEN NULL
+        WHEN p_stock > 0 THEN
+            CASE WHEN p_stored >= CURRENT_DATE THEN p_stored ELSE CURRENT_DATE + p_lead_days END
+        ELSE
+            CASE WHEN p_stored >= CURRENT_DATE THEN p_stored END
+    END
+$$;
+
 -- =============================================================================
 -- 1. USERS & AUTHENTICATION
 -- =============================================================================
@@ -121,6 +141,8 @@ CREATE TABLE addresses (
     country_code        char(2)     NOT NULL CHECK (country_code ~ '^[A-Z]{2}$'),
     phone               text,
     is_default_shipping boolean     NOT NULL DEFAULT false,
+    -- false = one-off checkout address that is not shown in the user's address book
+    is_saved            boolean     NOT NULL DEFAULT true,
     created_at          timestamptz NOT NULL DEFAULT now(),
     updated_at          timestamptz NOT NULL DEFAULT now()
 );
@@ -212,6 +234,8 @@ CREATE TABLE carts (
     id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     user_id    bigint      NOT NULL REFERENCES users (id) ON DELETE CASCADE,
     status     cart_status NOT NULL DEFAULT 'active',
+    -- chosen in checkout step 1 (POST /api/checkout/address)
+    shipping_address_id bigint REFERENCES addresses (id) ON DELETE SET NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now()
 );
@@ -314,6 +338,7 @@ CREATE TABLE orders (
     shipped_at                timestamptz,
     delivered_at              timestamptz,
     cancelled_at              timestamptz,
+    cancel_reason             text,
     updated_at                timestamptz  NOT NULL DEFAULT now(),
     CONSTRAINT orders_discount_matches_points
         CHECK (discount_amount = gift_points_value(gift_points_redeemed)),
@@ -353,12 +378,30 @@ CREATE TABLE payments (
     provider_reference text,                              -- PSP transaction / intent id
     card_brand         text,
     card_last4         char(4) CHECK (card_last4 ~ '^[0-9]{4}$'),
+    card_type          text    CHECK (card_type IN ('credit', 'debit')),
     created_at         timestamptz    NOT NULL DEFAULT now(),
     captured_at        timestamptz,
     updated_at         timestamptz    NOT NULL DEFAULT now(),
     UNIQUE (provider, provider_reference)
 );
 CREATE INDEX payments_order_idx ON payments (order_id);
+
+-- Replay protection for POST /api/checkout/payment. The row is inserted inside the
+-- checkout transaction, so a concurrent request with the same key waits for the first
+-- one to commit and then receives its stored response; a rolled-back attempt leaves
+-- no row and can be retried. The stored response contains order data (PII): purge
+-- rows older than 24 h with a scheduled job, e.g.
+--   DELETE FROM idempotency_keys WHERE created_at < now() - interval '24 hours';
+CREATE TABLE idempotency_keys (
+    user_id         bigint      NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    key             text        NOT NULL CHECK (key ~ '^[A-Za-z0-9_-]{16,64}$'),
+    request_hash    text        NOT NULL,                 -- SHA-256 of the canonical request body
+    response_status smallint,
+    response_body   jsonb,
+    created_at      timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (user_id, key)
+);
+CREATE INDEX idempotency_keys_created_idx ON idempotency_keys (created_at);
 
 -- -----------------------------------------------------------------------------
 -- "Buy it again": what a user has bought before, most recent first, limited to
