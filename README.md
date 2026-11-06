@@ -13,9 +13,20 @@ psql -v ON_ERROR_STOP=1 -d books -f db/examples.sql # sample queries (writes are
 
 The seed data is fictional and contains no real credentials.
 
+## API (OpenAPI 3.0)
+
+The REST contract is in [`api/openapi.yaml`](api/openapi.yaml) (13 endpoints: authentication,
+catalogue and recommendations, order history / "Buy it again" / cancellation, basket and checkout).
+Statuses and enums match the database schema.
+
+```bash
+npx @redocly/cli@2.76.0 lint api/openapi.yaml      # validate
+npx @redocly/cli@2.76.0 preview-docs api/openapi.yaml   # browse the docs locally
+```
+
 ## Status
 
-Database schema complete; application layer to be defined.
+Database schema and API contract complete; implementation to be defined.
 
 ## License
 

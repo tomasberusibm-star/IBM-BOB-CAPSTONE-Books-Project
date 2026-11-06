@@ -1,0 +1,1508 @@
+openapi: 3.0.3
+
+info:
+  title: IBM BOB CAPSTONE Books API
+  version: 1.0.0
+  description: |
+    REST API for the e-bookstore platform. The contract is aligned with the PostgreSQL
+    schema in `db/schema.sql` (statuses, enums, field names and business rules).
+
+    ## Conventions
+    * **Transport:** HTTPS only (TLS 1.2+). JSON request and response bodies.
+    * **Authentication:** `Authorization: Bearer <access_token>` (JWT) obtained from
+      `POST /api/auth/login`. Endpoints that need no token say so explicitly
+      (`security: []`).
+    * **Money:** decimal **strings** with two fraction digits (e.g. `"44.99"`), never
+      floating-point numbers. Currency is an ISO 4217 code (default `USD`).
+    * **Timestamps:** RFC 3339 / ISO 8601 in UTC. Dates: `YYYY-MM-DD`.
+    * **IDs:** users are addressed by an opaque UUID (`users.public_id`); catalogue,
+      basket and order resources use positive integers.
+    * **Pagination:** `page` (1-based) and `page_size` (default 20, max 100). List
+      responses carry `page`, `page_size`, `total_items` and `total_pages`.
+    * **Ownership:** an authenticated user can only read or change their own resources.
+      Another user's order is reported as `404`, so IDs cannot be probed.
+    * **Errors:** every non-2xx response uses the `Error` schema. Messages are generic;
+      internal details are never returned. Quote `request_id` when contacting support.
+    * **Gift points:** 1 point = 0.01 of the store currency.
+
+    ## Security notes
+    * Passwords are sent only to `/api/auth/*` over TLS and are never returned or logged.
+    * Card numbers and CVV **never touch this API**. The client tokenises the card
+      directly with the payment provider and sends only the resulting `payment_token`
+      (keeps the platform out of PCI DSS card-data scope).
+    * `POST /api/checkout/payment` requires an `Idempotency-Key` so a retried request
+      can never charge twice.
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+  contact:
+    name: IBM BOB CAPSTONE Books Project
+    url: https://github.com/tomasberusibm-star/IBM-BOB-CAPSTONE-Books-Project
+
+servers:
+  - url: https://api.bookstore.test
+    description: Reference server (placeholder host; replace per environment)
+  - url: http://127.0.0.1:8080
+    description: Local development (loopback only)
+
+tags:
+  - name: Authentication
+    description: Account registration and login.
+  - name: Catalogue
+    description: Categories, products and related products. Public.
+  - name: Recommendations
+    description: Personalised suggestions based on the caller's order history.
+  - name: Orders
+    description: Order history, "Buy it again" and cancellation.
+  - name: Basket
+    description: The caller's active basket.
+  - name: Checkout
+    description: Shipping address selection and payment (cards and gift points).
+
+security:
+  - bearerAuth: []
+
+paths:
+  # ---------------------------------------------------------------------------
+  # 1. Authentication
+  # ---------------------------------------------------------------------------
+  /api/auth/register:
+    post:
+      tags: [Authentication]
+      operationId: registerUser
+      summary: Register a new customer account
+      description: |
+        Creates a user with status `pending_verification`. No session is issued; the
+        customer must verify their e-mail address and then log in.
+
+        Passwords must be 12-128 characters. They are hashed server-side with
+        Argon2id (or bcrypt) and are never stored or logged in plain text.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+            example:
+              email: alice@example.com
+              password: correct-horse-battery-staple
+              first_name: Alice
+              last_name: Example
+      responses:
+        '201':
+          description: Account created.
+          headers:
+            Location:
+              description: URL of the new user's orders collection.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: An account with this e-mail address already exists.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: EMAIL_ALREADY_REGISTERED
+                message: An account with this e-mail address already exists.
+                request_id: 3f1c9a52-7d0e-4b1a-9c55-1f6a2f0e8b11
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /api/auth/login:
+    post:
+      tags: [Authentication]
+      operationId: loginUser
+      summary: Log in and obtain an access token
+      description: |
+        Verifies the credentials and returns a short-lived bearer token.
+
+        * Wrong e-mail, wrong password, unverified, suspended and locked accounts all
+          return the same `401` so the response cannot be used to discover accounts.
+        * Repeated failures lock the account temporarily; excessive attempts from one
+          source return `429` with `Retry-After`.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            example:
+              email: alice@example.com
+              password: correct-horse-battery-staple
+      responses:
+        '200':
+          description: Authenticated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: Invalid credentials.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: INVALID_CREDENTIALS
+                message: Invalid e-mail or password.
+                request_id: 3f1c9a52-7d0e-4b1a-9c55-1f6a2f0e8b11
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  # ---------------------------------------------------------------------------
+  # 2. Catalogue & recommendations
+  # ---------------------------------------------------------------------------
+  /api/categories:
+    get:
+      tags: [Catalogue]
+      operationId: listCategories
+      summary: List the category tree
+      description: Returns all top-level categories, each with its nested `children`.
+      security: []
+      responses:
+        '200':
+          description: The category tree, ordered by `sort_order`.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Category'
+              example:
+                items:
+                  - id: 1
+                    parent_id: null
+                    slug: fiction
+                    name: Fiction
+                    children:
+                      - id: 3
+                        parent_id: 1
+                        slug: science-fiction
+                        name: Science Fiction
+                        children: []
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /api/categories/{id}/products:
+    get:
+      tags: [Catalogue]
+      operationId: listCategoryProducts
+      summary: List the products in a category
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/CategoryId'
+        - name: include_subcategories
+          in: query
+          description: Also include products from all descendant categories.
+          schema:
+            type: boolean
+            default: true
+        - name: sort
+          in: query
+          schema:
+            type: string
+            enum: [title, price_asc, price_desc, newest]
+            default: title
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: A page of products.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProductPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /api/products/{id}:
+    get:
+      tags: [Catalogue]
+      operationId: getProduct
+      summary: Get a product
+      description: |
+        Includes `availability` and the `tentative_delivery_date` shown to customers
+        (`null` for instantly available items such as e-books). Exact stock counts are
+        not exposed.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/ProductId'
+      responses:
+        '200':
+          description: The product.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProductDetail'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /api/products/{id}/related:
+    get:
+      tags: [Catalogue]
+      operationId: listRelatedProducts
+      summary: List products related to a product
+      description: Related-product mappings (similar, also bought, series, other formats ...).
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/ProductId'
+        - name: relation
+          in: query
+          description: Restrict to one relation type.
+          schema:
+            $ref: '#/components/schemas/RelationType'
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 10
+      responses:
+        '200':
+          description: Related products ordered by relation and `sort_order`.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/RelatedProduct'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /api/recommendations:
+    get:
+      tags: [Recommendations]
+      operationId: listRecommendations
+      summary: Get recommendations based on the caller's order history
+      description: |
+        Suggests products for the authenticated user, derived from their paid orders:
+        items related to past purchases and popular items in categories they buy from.
+        Products already purchased and inactive products are excluded (use the
+        order history to buy those again). Users with no history receive an empty list.
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 10
+      responses:
+        '200':
+          description: Recommended products, best first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Recommendation'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  # ---------------------------------------------------------------------------
+  # 3. Order history, "Buy it again", cancellation
+  # ---------------------------------------------------------------------------
+  /api/users/{id}/orders:
+    get:
+      tags: [Orders]
+      operationId: listUserOrders
+      summary: List a user's order history
+      description: |
+        Newest first. A user may only list their own orders; any other `id` returns
+        `403`. Each order reports whether it can still be cancelled
+        (`can_cancel` / `cancellable_until`) and re-ordered.
+      parameters:
+        - $ref: '#/components/parameters/UserId'
+        - name: status
+          in: query
+          description: Only orders with this status.
+          schema:
+            $ref: '#/components/schemas/OrderStatus'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: A page of orders.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /api/orders/reorder/{orderId}:
+    post:
+      tags: [Orders]
+      operationId: reorder
+      summary: Buy it again - add a past order's items to the basket
+      description: |
+        Copies the items of one of the caller's past orders into their active basket
+        (creating it if needed) at **current** prices. Quantities are added to any
+        quantity already in the basket, capped at 999 per product.
+
+        Items that are no longer sold or are out of stock are skipped and listed in
+        `skipped`, so the client can tell the customer. The call does not place an
+        order; continue with the checkout endpoints.
+
+        This call is not idempotent: repeating it adds the quantities again.
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      responses:
+        '200':
+          description: Items were processed; the updated basket is returned.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReorderResult'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: None of the order's items can be re-ordered.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: NOTHING_TO_REORDER
+                message: None of the items in this order are currently available.
+                request_id: 3f1c9a52-7d0e-4b1a-9c55-1f6a2f0e8b11
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /api/orders/cancel/{orderId}:
+    post:
+      tags: [Orders]
+      operationId: cancelOrder
+      summary: Cancel an order within 48 hours of placing it
+      description: |
+        An order can be cancelled only when **both** hold:
+        * `now - placed_at <= 48 hours`, and
+        * its status is `pending_payment`, `paid` or `processing` (not yet shipped).
+
+        On success the order becomes `cancelled`, reserved stock is returned, a captured
+        card payment is refunded and any redeemed gift points are credited back to the
+        customer's balance. The operation is idempotent: cancelling an already
+        cancelled order returns `200` with the order unchanged.
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CancelOrderRequest'
+      responses:
+        '200':
+          description: The order is cancelled.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: |
+            The order cannot be cancelled: `ORDER_NOT_CANCELLABLE` (already shipped,
+            delivered or refunded) or `CANCELLATION_WINDOW_EXPIRED` (older than 48 hours).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                windowExpired:
+                  summary: Older than 48 hours
+                  value:
+                    code: CANCELLATION_WINDOW_EXPIRED
+                    message: Orders can only be cancelled within 48 hours of being placed.
+                    request_id: 3f1c9a52-7d0e-4b1a-9c55-1f6a2f0e8b11
+                alreadyShipped:
+                  summary: Already shipped
+                  value:
+                    code: ORDER_NOT_CANCELLABLE
+                    message: This order can no longer be cancelled.
+                    request_id: 3f1c9a52-7d0e-4b1a-9c55-1f6a2f0e8b11
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  # ---------------------------------------------------------------------------
+  # 4. Basket & checkout
+  # ---------------------------------------------------------------------------
+  /api/basket/items:
+    post:
+      tags: [Basket]
+      operationId: addBasketItem
+      summary: Add a product to the basket
+      description: |
+        Adds `quantity` of a product to the caller's active basket (created on first
+        use). If the product is already in the basket the quantities are added together
+        (maximum 999 per product). Returns the whole updated basket.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddBasketItemRequest'
+            example:
+              product_id: 1
+              quantity: 2
+      responses:
+        '200':
+          description: The updated basket.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Basket'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: The product is unavailable or there is not enough stock.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: INSUFFICIENT_STOCK
+                message: Not enough stock for the requested quantity.
+                request_id: 3f1c9a52-7d0e-4b1a-9c55-1f6a2f0e8b11
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /api/checkout/address:
+    post:
+      tags: [Checkout]
+      operationId: setCheckoutAddress
+      summary: Choose the shipping address and get the order summary
+      description: |
+        Step 1 of checkout. Provide **either** the `address_id` of a saved address
+        **or** a new `address`. The address is attached to the caller's active basket,
+        and the response prices the order (subtotal, shipping, tax) and shows the gift
+        points the customer can redeem in the next step. Can be called again to change
+        the address before paying.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CheckoutAddressRequest'
+            examples:
+              savedAddress:
+                summary: Use a saved address
+                value:
+                  address_id: 12
+              newAddress:
+                summary: Provide a new address
+                value:
+                  address:
+                    recipient_name: Alice Example
+                    line1: 1 Example Street
+                    city: Springfield
+                    region: IL
+                    postal_code: '62701'
+                    country_code: US
+                    save_to_address_book: true
+      responses:
+        '200':
+          description: Address accepted; order summary returned.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckoutSummary'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: The basket is empty or contains unavailable items.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: BASKET_EMPTY
+                message: The basket is empty.
+                request_id: 3f1c9a52-7d0e-4b1a-9c55-1f6a2f0e8b11
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /api/checkout/payment:
+    post:
+      tags: [Checkout]
+      operationId: payCheckout
+      summary: Pay for the basket with a card and/or gift points
+      description: |
+        Step 2 of checkout. Places the order and takes payment in one atomic operation:
+        stock is re-checked, prices are fixed, gift points are redeemed, the card is
+        charged for the remainder, and the basket is closed.
+
+        **Payment options**
+        * **Card only** - send `card`; `gift_points_to_redeem` is `0`.
+        * **Gift points + card** - send both; points reduce the amount charged to the card.
+        * **Gift points only** - send `gift_points_to_redeem` worth the full total and
+          omit `card`.
+
+        Credit and debit cards are supported through a provider-issued `payment_token`;
+        raw card numbers are rejected. `Idempotency-Key` is mandatory: replaying the same
+        key returns the original result and never charges twice.
+
+        Gift points cannot exceed the customer's balance or the order subtotal.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          description: Client-generated unique key (UUID recommended) for this payment attempt.
+          schema:
+            type: string
+            minLength: 16
+            maxLength: 64
+            pattern: '^[A-Za-z0-9_-]+$'
+          example: 7b0c2f6e-1d5a-4e21-9a7e-0f8f3c2d9b44
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PaymentRequest'
+            examples:
+              cardOnly:
+                summary: Credit card
+                value:
+                  card:
+                    payment_token: tok_visa_4242
+                    card_type: credit
+              pointsAndCard:
+                summary: 500 gift points plus a debit card
+                value:
+                  gift_points_to_redeem: 500
+                  card:
+                    payment_token: tok_mc_debit_0005
+                    card_type: debit
+              pointsOnly:
+                summary: Gift points cover the whole total
+                value:
+                  gift_points_to_redeem: 4500
+      responses:
+        '201':
+          description: Order placed and paid.
+          headers:
+            Location:
+              description: URL of the user's orders collection.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          description: The card was declined. No order is created and gift points are not deducted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: PAYMENT_DECLINED
+                message: The payment was declined. Please use another card.
+                request_id: 3f1c9a52-7d0e-4b1a-9c55-1f6a2f0e8b11
+        '409':
+          description: |
+            The basket cannot be ordered: `ADDRESS_REQUIRED` (step 1 not done),
+            `BASKET_EMPTY`, `INSUFFICIENT_STOCK`, or the `Idempotency-Key` is already
+            being processed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: ADDRESS_REQUIRED
+                message: Select a shipping address before paying.
+                request_id: 3f1c9a52-7d0e-4b1a-9c55-1f6a2f0e8b11
+        '422':
+          description: |
+            Valid request, but the payment is not acceptable: `INSUFFICIENT_GIFT_POINTS`,
+            `GIFT_POINTS_EXCEED_SUBTOTAL`, or `PAYMENT_METHOD_REQUIRED` (points do not
+            cover the total and no card was supplied).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: INSUFFICIENT_GIFT_POINTS
+                message: The gift points balance is too low.
+                request_id: 3f1c9a52-7d0e-4b1a-9c55-1f6a2f0e8b11
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Short-lived access token from `POST /api/auth/login`.
+
+  parameters:
+    CategoryId:
+      name: id
+      in: path
+      required: true
+      description: Category ID.
+      schema:
+        type: integer
+        format: int32
+        minimum: 1
+    ProductId:
+      name: id
+      in: path
+      required: true
+      description: Product ID.
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+    OrderId:
+      name: orderId
+      in: path
+      required: true
+      description: Order ID. Must belong to the authenticated user.
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+    UserId:
+      name: id
+      in: path
+      required: true
+      description: User ID (UUID). Must be the authenticated user.
+      schema:
+        type: string
+        format: uuid
+    Page:
+      name: page
+      in: query
+      description: 1-based page number.
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+    PageSize:
+      name: page_size
+      in: query
+      description: Items per page.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+
+  responses:
+    BadRequest:
+      description: The request is malformed or fails validation.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: VALIDATION_FAILED
+            message: The request is invalid.
+            details:
+              - field: quantity
+                issue: must be between 1 and 999
+            request_id: 3f1c9a52-7d0e-4b1a-9c55-1f6a2f0e8b11
+    Unauthorized:
+      description: The access token is missing, invalid or expired.
+      headers:
+        WWW-Authenticate:
+          description: Authentication scheme required.
+          schema:
+            type: string
+            example: Bearer
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: UNAUTHENTICATED
+            message: Authentication is required.
+            request_id: 3f1c9a52-7d0e-4b1a-9c55-1f6a2f0e8b11
+    Forbidden:
+      description: The caller is not allowed to access this resource.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: FORBIDDEN
+            message: You do not have access to this resource.
+            request_id: 3f1c9a52-7d0e-4b1a-9c55-1f6a2f0e8b11
+    NotFound:
+      description: The resource does not exist or is not accessible to the caller.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: NOT_FOUND
+            message: The requested resource was not found.
+            request_id: 3f1c9a52-7d0e-4b1a-9c55-1f6a2f0e8b11
+    TooManyRequests:
+      description: Rate limit exceeded.
+      headers:
+        Retry-After:
+          description: Seconds to wait before retrying.
+          schema:
+            type: integer
+            minimum: 1
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: RATE_LIMITED
+            message: Too many requests. Please try again later.
+            request_id: 3f1c9a52-7d0e-4b1a-9c55-1f6a2f0e8b11
+
+  schemas:
+    # ----- shared primitives ---------------------------------------------------
+    Money:
+      type: string
+      pattern: '^\d{1,10}\.\d{2}$'
+      description: Decimal amount with exactly two fraction digits.
+      example: '44.99'
+    Currency:
+      type: string
+      pattern: '^[A-Z]{3}$'
+      description: ISO 4217 currency code.
+      example: USD
+    Error:
+      type: object
+      required: [code, message, request_id]
+      properties:
+        code:
+          type: string
+          description: Stable machine-readable error code.
+          example: VALIDATION_FAILED
+        message:
+          type: string
+          description: Safe, human-readable summary. Never contains internals or secrets.
+        details:
+          type: array
+          description: Field-level problems (validation errors only).
+          items:
+            type: object
+            required: [field, issue]
+            properties:
+              field:
+                type: string
+              issue:
+                type: string
+        request_id:
+          type: string
+          description: Correlation ID for support and log lookup.
+    PageInfo:
+      type: object
+      required: [page, page_size, total_items, total_pages]
+      properties:
+        page:
+          type: integer
+          minimum: 1
+        page_size:
+          type: integer
+          minimum: 1
+        total_items:
+          type: integer
+          minimum: 0
+        total_pages:
+          type: integer
+          minimum: 0
+
+    # ----- authentication ------------------------------------------------------
+    RegisterRequest:
+      type: object
+      additionalProperties: false
+      required: [email, password, first_name, last_name]
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 254
+        password:
+          type: string
+          format: password
+          writeOnly: true
+          minLength: 12
+          maxLength: 128
+        first_name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        last_name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        phone:
+          type: string
+          maxLength: 32
+          pattern: '^\+?[0-9 ()-]{6,32}$'
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 254
+        password:
+          type: string
+          format: password
+          writeOnly: true
+          minLength: 1
+          maxLength: 128
+    UserStatus:
+      type: string
+      description: Mirrors the `user_status` database enum.
+      enum: [pending_verification, active, suspended, closed]
+    User:
+      type: object
+      required: [id, email, first_name, last_name, status, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        first_name:
+          type: string
+        last_name:
+          type: string
+        status:
+          $ref: '#/components/schemas/UserStatus'
+        created_at:
+          type: string
+          format: date-time
+    AuthResponse:
+      type: object
+      required: [access_token, token_type, expires_in, user]
+      properties:
+        access_token:
+          type: string
+          description: JWT to send as `Authorization - Bearer`.
+        token_type:
+          type: string
+          enum: [Bearer]
+        expires_in:
+          type: integer
+          description: Token lifetime in seconds.
+          example: 900
+        user:
+          $ref: '#/components/schemas/User'
+
+    # ----- catalogue -----------------------------------------------------------
+    Category:
+      type: object
+      required: [id, parent_id, slug, name, children]
+      properties:
+        id:
+          type: integer
+          format: int32
+        parent_id:
+          type: integer
+          format: int32
+          nullable: true
+        slug:
+          type: string
+        name:
+          type: string
+        children:
+          type: array
+          items:
+            $ref: '#/components/schemas/Category'
+    CategoryRef:
+      type: object
+      required: [id, slug, name]
+      properties:
+        id:
+          type: integer
+          format: int32
+        slug:
+          type: string
+        name:
+          type: string
+        is_primary:
+          type: boolean
+    Brand:
+      type: object
+      required: [id, slug, name]
+      properties:
+        id:
+          type: integer
+          format: int32
+        slug:
+          type: string
+        name:
+          type: string
+    ProductFormat:
+      type: string
+      description: Mirrors the `product_format` database enum.
+      enum: [hardcover, paperback, ebook, audiobook]
+    Availability:
+      type: string
+      description: |
+        `always_available` - stock is not tracked (e-books).
+        `low_stock` - 5 or fewer left. `out_of_stock` - cannot be ordered now.
+      enum: [in_stock, low_stock, out_of_stock, always_available]
+    RelationType:
+      type: string
+      description: Mirrors the `relation_type` database enum.
+      enum: [similar, also_bought, series, accessory, other_format]
+    ProductSummary:
+      type: object
+      required: [id, sku, title, authors, format, price, currency, availability, tentative_delivery_date]
+      properties:
+        id:
+          type: integer
+          format: int64
+        sku:
+          type: string
+        title:
+          type: string
+        authors:
+          type: array
+          items:
+            type: string
+        format:
+          $ref: '#/components/schemas/ProductFormat'
+        price:
+          $ref: '#/components/schemas/Money'
+        currency:
+          $ref: '#/components/schemas/Currency'
+        availability:
+          $ref: '#/components/schemas/Availability'
+        tentative_delivery_date:
+          type: string
+          format: date
+          nullable: true
+          description: Estimated delivery or restock date; `null` when instant or unknown.
+    ProductDetail:
+      allOf:
+        - $ref: '#/components/schemas/ProductSummary'
+        - type: object
+          required: [brand, categories]
+          properties:
+            isbn13:
+              type: string
+              nullable: true
+              pattern: '^[0-9]{13}$'
+            description:
+              type: string
+              nullable: true
+            published_on:
+              type: string
+              format: date
+              nullable: true
+            brand:
+              $ref: '#/components/schemas/Brand'
+            categories:
+              type: array
+              items:
+                $ref: '#/components/schemas/CategoryRef'
+    ProductPage:
+      allOf:
+        - $ref: '#/components/schemas/PageInfo'
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/ProductSummary'
+    RelatedProduct:
+      type: object
+      required: [relation, product]
+      properties:
+        relation:
+          $ref: '#/components/schemas/RelationType'
+        product:
+          $ref: '#/components/schemas/ProductSummary'
+    Recommendation:
+      type: object
+      required: [product, reason]
+      properties:
+        product:
+          $ref: '#/components/schemas/ProductSummary'
+        reason:
+          type: string
+          enum: [related_to_purchase, same_category, popular_with_similar_customers]
+        based_on_product_id:
+          type: integer
+          format: int64
+          nullable: true
+          description: The previously purchased product that triggered this suggestion, if any.
+
+    # ----- addresses -----------------------------------------------------------
+    AddressInput:
+      type: object
+      additionalProperties: false
+      required: [recipient_name, line1, city, postal_code, country_code]
+      properties:
+        label:
+          type: string
+          maxLength: 50
+        recipient_name:
+          type: string
+          maxLength: 150
+        line1:
+          type: string
+          maxLength: 200
+        line2:
+          type: string
+          maxLength: 200
+        city:
+          type: string
+          maxLength: 100
+        region:
+          type: string
+          maxLength: 100
+        postal_code:
+          type: string
+          maxLength: 20
+        country_code:
+          type: string
+          pattern: '^[A-Z]{2}$'
+          description: ISO 3166-1 alpha-2.
+        phone:
+          type: string
+          maxLength: 32
+        save_to_address_book:
+          type: boolean
+          default: false
+          description: Store the address for future orders.
+    Address:
+      type: object
+      required: [recipient_name, line1, city, postal_code, country_code]
+      properties:
+        id:
+          type: integer
+          format: int64
+          description: Present for saved addresses only.
+        label:
+          type: string
+          nullable: true
+        recipient_name:
+          type: string
+        line1:
+          type: string
+        line2:
+          type: string
+          nullable: true
+        city:
+          type: string
+        region:
+          type: string
+          nullable: true
+        postal_code:
+          type: string
+        country_code:
+          type: string
+          pattern: '^[A-Z]{2}$'
+        phone:
+          type: string
+          nullable: true
+
+    # ----- orders --------------------------------------------------------------
+    OrderStatus:
+      type: string
+      description: Mirrors the `order_status` database enum.
+      enum: [pending_payment, paid, processing, shipped, delivered, cancelled, refunded]
+    OrderItem:
+      type: object
+      required: [product_id, sku, title, unit_price, quantity, line_total]
+      properties:
+        product_id:
+          type: integer
+          format: int64
+        sku:
+          type: string
+        title:
+          type: string
+        unit_price:
+          $ref: '#/components/schemas/Money'
+        quantity:
+          type: integer
+          minimum: 1
+        line_total:
+          $ref: '#/components/schemas/Money'
+        tentative_delivery_date:
+          type: string
+          format: date
+          nullable: true
+    Order:
+      type: object
+      required:
+        - id
+        - order_number
+        - status
+        - currency
+        - subtotal_amount
+        - shipping_amount
+        - tax_amount
+        - discount_amount
+        - total_amount
+        - gift_points_redeemed
+        - placed_at
+        - items
+        - can_cancel
+        - can_reorder
+      properties:
+        id:
+          type: integer
+          format: int64
+        order_number:
+          type: string
+          example: BK-0000000001
+        status:
+          $ref: '#/components/schemas/OrderStatus'
+        currency:
+          $ref: '#/components/schemas/Currency'
+        subtotal_amount:
+          $ref: '#/components/schemas/Money'
+        shipping_amount:
+          $ref: '#/components/schemas/Money'
+        tax_amount:
+          $ref: '#/components/schemas/Money'
+        discount_amount:
+          allOf:
+            - $ref: '#/components/schemas/Money'
+          description: Value of the redeemed gift points.
+        total_amount:
+          allOf:
+            - $ref: '#/components/schemas/Money'
+          description: Money charged - subtotal + shipping + tax - discount.
+        gift_points_redeemed:
+          type: integer
+          minimum: 0
+        placed_at:
+          type: string
+          format: date-time
+        shipped_at:
+          type: string
+          format: date-time
+          nullable: true
+        delivered_at:
+          type: string
+          format: date-time
+          nullable: true
+        cancelled_at:
+          type: string
+          format: date-time
+          nullable: true
+        shipping_address:
+          $ref: '#/components/schemas/Address'
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/OrderItem'
+        can_cancel:
+          type: boolean
+          description: True while the order is within 48 hours of `placed_at` and not yet shipped.
+        cancellable_until:
+          type: string
+          format: date-time
+          nullable: true
+          description: "`placed_at` plus 48 hours; `null` once the order can no longer be cancelled."
+        can_reorder:
+          type: boolean
+          description: True if at least one item is still on sale.
+    OrderPage:
+      allOf:
+        - $ref: '#/components/schemas/PageInfo'
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/Order'
+    CancelOrderRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        reason:
+          type: string
+          maxLength: 500
+          description: Optional free-text reason for the customer-service team.
+    ReorderResult:
+      type: object
+      required: [basket, added, skipped]
+      properties:
+        basket:
+          $ref: '#/components/schemas/Basket'
+        added:
+          type: array
+          items:
+            type: object
+            required: [product_id, quantity]
+            properties:
+              product_id:
+                type: integer
+                format: int64
+              quantity:
+                type: integer
+                minimum: 1
+        skipped:
+          type: array
+          items:
+            type: object
+            required: [product_id, title, reason]
+            properties:
+              product_id:
+                type: integer
+                format: int64
+              title:
+                type: string
+              reason:
+                type: string
+                enum: [product_unavailable, out_of_stock]
+
+    # ----- basket & checkout ---------------------------------------------------
+    AddBasketItemRequest:
+      type: object
+      additionalProperties: false
+      required: [product_id, quantity]
+      properties:
+        product_id:
+          type: integer
+          format: int64
+          minimum: 1
+        quantity:
+          type: integer
+          minimum: 1
+          maximum: 999
+    BasketItem:
+      type: object
+      required: [product, quantity, line_total]
+      properties:
+        product:
+          $ref: '#/components/schemas/ProductSummary'
+        quantity:
+          type: integer
+          minimum: 1
+          maximum: 999
+        line_total:
+          $ref: '#/components/schemas/Money'
+    Basket:
+      type: object
+      required: [id, items, item_count, subtotal_amount, currency]
+      properties:
+        id:
+          type: integer
+          format: int64
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/BasketItem'
+        item_count:
+          type: integer
+          minimum: 0
+          description: Total units across all lines.
+        subtotal_amount:
+          $ref: '#/components/schemas/Money'
+        currency:
+          $ref: '#/components/schemas/Currency'
+    CheckoutAddressRequest:
+      description: Exactly one of `address_id` or `address`.
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [address_id]
+          properties:
+            address_id:
+              type: integer
+              format: int64
+              minimum: 1
+              description: A saved address belonging to the caller.
+        - type: object
+          additionalProperties: false
+          required: [address]
+          properties:
+            address:
+              $ref: '#/components/schemas/AddressInput'
+    CheckoutSummary:
+      type: object
+      required:
+        - shipping_address
+        - subtotal_amount
+        - shipping_amount
+        - tax_amount
+        - total_amount
+        - currency
+        - gift_points_balance
+        - max_redeemable_points
+        - gift_point_value
+      properties:
+        shipping_address:
+          $ref: '#/components/schemas/Address'
+        subtotal_amount:
+          $ref: '#/components/schemas/Money'
+        shipping_amount:
+          $ref: '#/components/schemas/Money'
+        tax_amount:
+          $ref: '#/components/schemas/Money'
+        total_amount:
+          allOf:
+            - $ref: '#/components/schemas/Money'
+          description: Amount due before any gift points are applied.
+        currency:
+          $ref: '#/components/schemas/Currency'
+        gift_points_balance:
+          type: integer
+          minimum: 0
+        max_redeemable_points:
+          type: integer
+          minimum: 0
+          description: Lower of the balance and the points whose value equals the subtotal.
+        gift_point_value:
+          allOf:
+            - $ref: '#/components/schemas/Money'
+          description: Currency value of one point.
+          example: '0.01'
+        tentative_delivery_date:
+          type: string
+          format: date
+          nullable: true
+          description: Latest tentative delivery date among the basket items.
+    CardPayment:
+      type: object
+      additionalProperties: false
+      required: [payment_token, card_type]
+      properties:
+        payment_token:
+          type: string
+          minLength: 8
+          maxLength: 255
+          pattern: '^[A-Za-z0-9_-]+$'
+          description: |
+            Single-use token from the payment provider's client SDK. Raw card numbers
+            or CVV are never accepted and fail validation.
+        card_type:
+          type: string
+          enum: [credit, debit]
+    PaymentRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        gift_points_to_redeem:
+          type: integer
+          minimum: 0
+          default: 0
+          description: Points to spend; 1 point = 0.01.
+        card:
+          $ref: '#/components/schemas/CardPayment'
+      description: |
+        At least one of `card` or a positive `gift_points_to_redeem` is required. If the
+        points do not cover the full total, `card` is mandatory.
+    PaymentStatus:
+      type: string
+      description: Mirrors the `payment_status` database enum.
+      enum: [pending, authorized, captured, failed, refunded]
+    PaymentResult:
+      type: object
+      required: [order, gift_points_redeemed, gift_points_balance]
+      properties:
+        order:
+          $ref: '#/components/schemas/Order'
+        payment:
+          type: object
+          nullable: true
+          description: The card payment; `null` when gift points covered the whole total.
+          required: [id, status, method, amount, currency]
+          properties:
+            id:
+              type: integer
+              format: int64
+            status:
+              $ref: '#/components/schemas/PaymentStatus'
+            method:
+              type: string
+              enum: [card]
+            amount:
+              $ref: '#/components/schemas/Money'
+            currency:
+              $ref: '#/components/schemas/Currency'
+            card_brand:
+              type: string
+              nullable: true
+              example: visa
+            card_last4:
+              type: string
+              nullable: true
+              pattern: '^[0-9]{4}$'
+            card_type:
+              type: string
+              enum: [credit, debit]
+              nullable: true
+        gift_points_redeemed:
+          type: integer
+          minimum: 0
+        gift_points_balance:
+          type: integer
+          minimum: 0
+          description: Remaining balance after this order.
