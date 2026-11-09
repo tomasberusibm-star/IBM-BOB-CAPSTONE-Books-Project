@@ -1,6 +1,6 @@
 import { Link } from 'react-router';
 import { api } from '../api/client.js';
-import { BookCover, ProductGrid } from '../components/ProductCard.jsx';
+import { BookCover, ProductCard, ProductGrid } from '../components/ProductCard.jsx';
 import { EmptyState, ErrorState, LinkButton, Spinner } from '../components/ui.jsx';
 import { useAuth } from '../context/AuthContext.jsx';
 import { useAsync } from '../lib/useAsync.js';
@@ -37,9 +37,9 @@ function Recommended() {
   return (
     <ul className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
       {data.items.map(({ product, reason }) => (
-        <li key={product.id} className="flex flex-col">
+        <li key={product.id} className="flex flex-col [&>article]:flex-1">
           <p className="mb-1 text-xs font-medium tracking-wide text-brand-700 uppercase">{REASON_TEXT[reason]}</p>
-          <ProductGrid products={[product]} />
+          <ProductCard product={product} />
         </li>
       ))}
     </ul>

@@ -35,7 +35,7 @@ it for its own processes; if you call `npx cypress` directly, use `env -u ELECTR
 |---|---|---|---|
 | Backend integration | `node:test` | `backend/test` | Services and SQL behave (96 tests) |
 | **API contract and behaviour** | **Jest + Supertest** | `qa/api` | The deployed API matches the OpenAPI spec and the business rules (167 tests) |
-| Component / page | Vitest + React Testing Library | `frontend/test` | Each page behaves for every API outcome, API mocked (88 tests) |
+| Component / page | Vitest + React Testing Library | `frontend/test` | Each page behaves for every API outcome, API mocked (89 tests) |
 | **End to end** | **Cypress** | `qa/cypress/e2e` | The real UI + API + database work together in a browser (75 tests) |
 
 **Contract checking.** Every Supertest response is validated against the OpenAPI response schema for that

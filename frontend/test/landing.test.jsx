@@ -59,6 +59,18 @@ describe('Landing page', () => {
     expect(api.recommendations).toHaveBeenCalledWith(8, expect.anything());
   });
 
+  it('lays each recommendation out as one card per grid cell, not a grid nested inside a grid cell', async () => {
+    signIn();
+    vi.spyOn(api, 'recommendations').mockResolvedValue({
+      items: [{ reason: 'related_to_purchase', product: product({ id: 21, title: 'Neuromancer' }) }],
+    });
+    renderApp('/');
+
+    const card = (await screen.findByRole('link', { name: 'Neuromancer' })).closest('article');
+    // A nested list shrank every card to its content width (the "Recommended for you" bug).
+    expect(card.closest('ul').parentElement.closest('li')).toBeNull();
+  });
+
   it('explains that recommendations need a first order', async () => {
     signIn();
     vi.spyOn(api, 'recommendations').mockResolvedValue({ items: [] });

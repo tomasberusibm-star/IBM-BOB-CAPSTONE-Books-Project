@@ -66,7 +66,7 @@ customer who has two past orders and 1,500 gift points. It prints the URL and a 
 
 ## Status
 
-Database schema, API contract, backend (96 tests against a real PostgreSQL), frontend (88 component
+Database schema, API contract, backend (96 tests against a real PostgreSQL), frontend (89 component
 tests) and the QA suite (167 API contract tests, 75 Cypress browser tests) are implemented. Payments use a
 mock processor: no real card is ever charged.
 
