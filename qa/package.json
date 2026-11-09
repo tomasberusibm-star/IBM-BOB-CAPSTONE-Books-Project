@@ -12,6 +12,7 @@
     "test:api": "NODE_OPTIONS=--experimental-vm-modules jest",
     "test:e2e": "node scripts/e2e.mjs",
     "test:e2e:open": "node scripts/e2e.mjs --open",
+    "demo": "node scripts/demo.mjs",
     "lint": "eslint ."
   },
   "dependencies": {

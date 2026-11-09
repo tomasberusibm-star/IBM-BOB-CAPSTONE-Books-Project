@@ -55,6 +55,15 @@ matrix and how to run it.
 cd qa && npm install && npm run test:api && npm run test:e2e
 ```
 
+### Run a demo
+
+```bash
+cd qa && npm install && npm run demo
+```
+
+Starts a throwaway database, API and web UI on `127.0.0.1` (mock payments, nothing real is charged), with a demo
+customer who has two past orders and 1,500 gift points. It prints the URL and a random password; Ctrl-C removes everything.
+
 ## Status
 
 Database schema, API contract, backend (96 tests against a real PostgreSQL), frontend (88 component
